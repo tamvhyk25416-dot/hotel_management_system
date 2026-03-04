@@ -1,39 +1,63 @@
 from flask import Blueprint, request, jsonify
 from ..extensions import db
 from ..models.room import Room
+from sqlalchemy.exc import SQLAlchemyError
 
 room_bp = Blueprint("room_bp", __name__)
+
+VALID_ROOM_STATUS = ["Trống", "Đang ở", "Đang dọn", "Bảo trì"]
+
 
 # =========================
 # CREATE ROOM
 # =========================
 @room_bp.route("/rooms", methods=["POST"])
 def create_room():
-    data = request.json
+    try:
+        data = request.get_json()
 
-    if not data:
-        return jsonify({"error": "No input data provided"}), 400
+        if not data:
+            return jsonify({"error": "Không có dữ liệu gửi lên"}), 400
 
-    required_fields = ["room_number", "room_type", "price"]
+        required_fields = ["room_number", "room_type", "price"]
 
-    for field in required_fields:
-        if field not in data:
-            return jsonify({"error": f"{field} is required"}), 400
+        for field in required_fields:
+            if field not in data:
+                return jsonify({"error": f"Thiếu trường {field}"}), 400
 
-    if not isinstance(data["price"], (int, float)):
-        return jsonify({"error": "Price must be a number"}), 400
+        if not isinstance(data["price"], (int, float)):
+            return jsonify({"error": "Giá phòng phải là số"}), 400
 
-    new_room = Room(
-        room_number=data["room_number"],
-        room_type=data["room_type"],
-        price=data["price"],
-        status=data.get("status", "available")
-    )
+        if data["price"] <= 0:
+            return jsonify({"error": "Giá phòng phải lớn hơn 0"}), 400
 
-    db.session.add(new_room)
-    db.session.commit()
+        existing_room = Room.query.filter_by(
+            room_number=data["room_number"]
+        ).first()
 
-    return jsonify({"message": "Room created successfully"}), 201
+        if existing_room:
+            return jsonify({"error": "Số phòng đã tồn tại"}), 400
+
+        status = data.get("status", "Trống")
+
+        if status not in VALID_ROOM_STATUS:
+            return jsonify({"error": "Trạng thái phòng không hợp lệ"}), 400
+
+        new_room = Room(
+            room_number=data["room_number"],
+            room_type=data["room_type"],
+            price=data["price"],
+            status=status
+        )
+
+        db.session.add(new_room)
+        db.session.commit()
+
+        return jsonify({"message": "Tạo phòng thành công"}), 201
+
+    except (ValueError, SQLAlchemyError) as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 400
 
 
 # =========================
@@ -49,7 +73,7 @@ def get_rooms():
             "id": room.id,
             "room_number": room.room_number,
             "room_type": room.room_type,
-            "price": room.price,
+            "price": float(room.price),
             "status": room.status
         })
 
@@ -61,13 +85,16 @@ def get_rooms():
 # =========================
 @room_bp.route("/rooms/<int:id>", methods=["GET"])
 def get_room(id):
-    room = Room.query.get_or_404(id)
+    room = Room.query.get(id)
+
+    if not room:
+        return jsonify({"error": "Không tìm thấy phòng"}), 404
 
     return jsonify({
         "id": room.id,
         "room_number": room.room_number,
         "room_type": room.room_type,
-        "price": room.price,
+        "price": float(room.price),
         "status": room.status
     }), 200
 
@@ -77,23 +104,47 @@ def get_room(id):
 # =========================
 @room_bp.route("/rooms/<int:id>", methods=["PUT"])
 def update_room(id):
-    room = Room.query.get_or_404(id)
-    data = request.json
+    try:
+        room = Room.query.get(id)
 
-    if not data:
-        return jsonify({"error": "No input data provided"}), 400
+        if not room:
+            return jsonify({"error": "Không tìm thấy phòng"}), 404
 
-    if "price" in data and not isinstance(data["price"], (int, float)):
-        return jsonify({"error": "Price must be a number"}), 400
+        data = request.get_json()
 
-    room.room_number = data.get("room_number", room.room_number)
-    room.room_type = data.get("room_type", room.room_type)
-    room.price = data.get("price", room.price)
-    room.status = data.get("status", room.status)
+        if not data:
+            return jsonify({"error": "Không có dữ liệu gửi lên"}), 400
 
-    db.session.commit()
+        if "price" in data:
+            if not isinstance(data["price"], (int, float)):
+                return jsonify({"error": "Giá phòng phải là số"}), 400
+            if data["price"] <= 0:
+                return jsonify({"error": "Giá phòng phải lớn hơn 0"}), 400
 
-    return jsonify({"message": "Room updated successfully"}), 200
+        if "status" in data:
+            if data["status"] not in VALID_ROOM_STATUS:
+                return jsonify({"error": "Trạng thái phòng không hợp lệ"}), 400
+
+        if "room_number" in data:
+            existing_room = Room.query.filter_by(
+                room_number=data["room_number"]
+            ).first()
+
+            if existing_room and existing_room.id != room.id:
+                return jsonify({"error": "Số phòng đã tồn tại"}), 400
+
+        room.room_number = data.get("room_number", room.room_number)
+        room.room_type = data.get("room_type", room.room_type)
+        room.price = data.get("price", room.price)
+        room.status = data.get("status", room.status)
+
+        db.session.commit()
+
+        return jsonify({"message": "Cập nhật phòng thành công"}), 200
+
+    except (ValueError, SQLAlchemyError) as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 400
 
 
 # =========================
@@ -101,9 +152,18 @@ def update_room(id):
 # =========================
 @room_bp.route("/rooms/<int:id>", methods=["DELETE"])
 def delete_room(id):
-    room = Room.query.get_or_404(id)
+    room = Room.query.get(id)
+
+    if not room:
+        return jsonify({"error": "Không tìm thấy phòng"}), 404
+
+    # Không cho xóa nếu đang có khách
+    if room.status == "Đang ở":
+        return jsonify({
+            "error": "Không thể xóa phòng đang có khách"
+        }), 400
 
     db.session.delete(room)
     db.session.commit()
 
-    return jsonify({"message": "Room deleted successfully"}), 200
+    return jsonify({"message": "Xóa phòng thành công"}), 200
